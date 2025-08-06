@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Matrix Shader Cubes</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <!-- Shader Scripts -->
+    <script id="vertexshader" type="x-shader/x-vertex">
+        varying vec2 vUv;
+        void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+        }
+    </script>
+    <script id="fragmentshader" type="x-shader/x-fragment">
+        uniform sampler2D baseTexture;
+        uniform sampler2D bloomTexture;
+        varying vec2 vUv;
+        void main() {
+            gl_FragColor = ( texture2D( baseTexture, vUv ) + vec4( 1.0 ) * texture2D( bloomTexture, vUv ) );
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+        import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+
+        let scene, camera, renderer, bloomComposer, finalComposer;
+        let cubeGroup;
+        const cubes = [];
+        const clock = new THREE.Clock();
+
+        const ENTIRE_SCENE = 0, GLOW_SCENE = 1;
+        const glowLayer = new THREE.Layers();
+        glowLayer.set(GLOW_SCENE);
+
+        const materials = {};
+        const darkMaterial = new THREE.MeshBasicMaterial({ color: "black" });
+
+        function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 50;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            // Add Lights!
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.1);
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0x00ff00, 0.5);
+            directionalLight.position.set(1, 1, 1);
+            scene.add(directionalLight);
+
+            cubeGroup = new THREE.Group();
+            scene.add(cubeGroup);
+
+            const geometry = new THREE.BoxGeometry(2, 2, 2);
+            const baseMaterial = new THREE.MeshStandardMaterial({ color: 0x00ff00, roughness: 0.4, metalness: 0.6 });
+
+            const numCubes = 500;
+            const radius = 20;
+
+            for (let i = 0; i < numCubes; i++) {
+                const cube = new THREE.Mesh(geometry, baseMaterial);
+                const phi = Math.acos(-1 + (2 * i) / numCubes);
+                const theta = Math.sqrt(numCubes * Math.PI) * phi;
+                cube.position.setFromSphericalCoords(radius, phi, theta);
+                cube.userData.rotationSpeed = {
+                    x: (Math.random() - 0.5) * 0.02,
+                    y: (Math.random() - 0.5) * 0.02,
+                    z: (Math.random() - 0.5) * 0.02
+                };
+                cubes.push(cube);
+                cubeGroup.add(cube);
+            }
+
+            // Post-processing setup
+            const renderPass = new RenderPass(scene, camera);
+
+            const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+            bloomPass.threshold = 0;
+            bloomPass.strength = 1.5;
+            bloomPass.radius = 0.4;
+
+            bloomComposer = new EffectComposer(renderer);
+            bloomComposer.renderToScreen = false;
+            bloomComposer.addPass(renderPass);
+            bloomComposer.addPass(bloomPass);
+
+            const finalPass = new ShaderPass(
+                new THREE.ShaderMaterial({
+                    uniforms: {
+                        baseTexture: { value: null },
+                        bloomTexture: { value: bloomComposer.renderTarget2.texture }
+                    },
+                    vertexShader: document.getElementById('vertexshader').textContent,
+                    fragmentShader: document.getElementById('fragmentshader').textContent,
+                    defines: {}
+                }), "baseTexture"
+            );
+            finalPass.needsSwap = true;
+
+            finalComposer = new EffectComposer(renderer);
+            finalComposer.addPass(renderPass);
+            finalComposer.addPass(finalPass);
+
+            window.addEventListener('resize', onWindowResize);
+            setInterval(triggerGlow, 200);
+
+            animate();
+        }
+
+        function triggerGlow() {
+            const glowingCube = cubes[Math.floor(Math.random() * cubes.length)];
+            if (glowingCube && !glowingCube.userData.isGlowing) {
+                glowingCube.userData.isGlowing = true;
+                glowingCube.layers.enable(GLOW_SCENE);
+                setTimeout(() => {
+                    glowingCube.layers.disable(GLOW_SCENE);
+                    glowingCube.userData.isGlowing = false;
+                }, 400);
+            }
+        }
+
+        function onWindowResize() {
+            const width = window.innerWidth;
+            const height = window.innerHeight;
+            camera.aspect = width / height;
+            camera.updateProjectionMatrix();
+            renderer.setSize(width, height);
+            bloomComposer.setSize(width, height);
+            finalComposer.setSize(width, height);
+        }
+
+        function darkenNonBloomed(obj) {
+            if (obj.isMesh && glowLayer.test(obj.layers) === false) {
+                materials[obj.uuid] = obj.material;
+                obj.material = darkMaterial;
+            }
+        }
+
+        function restoreMaterial(obj) {
+            if (materials[obj.uuid]) {
+                obj.material = materials[obj.uuid];
+                delete materials[obj.uuid];
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const time = clock.getElapsedTime();
+            cubeGroup.rotation.x = time * 0.05;
+            cubeGroup.rotation.y = time * 0.03;
+
+            cubes.forEach(cube => {
+                cube.rotation.x += cube.userData.rotationSpeed.x;
+                cube.rotation.y += cube.userData.rotationSpeed.y;
+                cube.rotation.z += cube.userData.rotationSpeed.z;
+            });
+
+            // 1. Render bloom pass
+            scene.traverse(darkenNonBloomed);
+            bloomComposer.render();
+            scene.traverse(restoreMaterial);
+
+            // 2. Render final pass
+            finalComposer.render();
+        }
+
+        init();
+    </script>
+</body>
+</html>
